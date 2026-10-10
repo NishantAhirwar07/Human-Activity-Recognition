@@ -1,8 +1,9 @@
 import os
+
 import numpy as np
 import pandas as pd
 import streamlit as st
-
+import tensorflow as tf
 
 # ----------------------------------------------------------------------
 # Page setup
@@ -13,8 +14,22 @@ st.set_page_config(
     layout="centered",
 )
 
-MODEL_PATH = "har_model.keras"
-DATASET_PATH = "UCI HAR Dataset"  # optional, only used for the demo tab
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def find_model_path():
+    """Look for the model next to this script, or any .keras/.h5 file there."""
+    default = os.path.join(BASE_DIR, "har_model.keras")
+    if os.path.exists(default):
+        return default
+    for name in sorted(os.listdir(BASE_DIR)):
+        if name.lower().endswith((".keras", ".h5")):
+            return os.path.join(BASE_DIR, name)
+    return None
+
+
+MODEL_PATH = find_model_path()
+DATASET_PATH = os.path.join(BASE_DIR, "UCI HAR Dataset")  # optional (demo tab)
 
 LABELS = [
     "Walking",
@@ -119,11 +134,12 @@ st.write(
     "data using an **LSTM** model trained on the UCI HAR dataset."
 )
 
-if not os.path.exists(MODEL_PATH):
+if MODEL_PATH is None:
     st.error(
-        f"Model file `{MODEL_PATH}` not found. Place it in the same folder as "
-        "`app.py` (run the notebook to generate it)."
+        "Model file not found. Upload `har_model.keras` to the same folder as "
+        "this app file in your GitHub repo (the notebook creates it)."
     )
+    st.caption(f"Files found in app folder: {', '.join(sorted(os.listdir(BASE_DIR)))}")
     st.stop()
 
 model = load_model()
