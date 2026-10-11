@@ -3,3 +3,5 @@ streamlit-webrtc
 mediapipe
 opencv-python-headless
 numpy
+libgl1
+libglib2.0-0t64
