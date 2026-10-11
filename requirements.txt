@@ -1,4 +1,0 @@
-streamlit
-tensorflow-cpu==2.21.0
-numpy
-pandas
