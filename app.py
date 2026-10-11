@@ -1,236 +1,101 @@
-import os
+from collections import deque
 
+import av
+import cv2
 import numpy as np
-import pandas as pd
 import streamlit as st
-import tensorflow as tf
+import mediapipe as mp
+from streamlit_webrtc import webrtc_streamer
 
-# ----------------------------------------------------------------------
-# Page setup
-# ----------------------------------------------------------------------
-st.set_page_config(
-    page_title="Human Activity Recognition",
-    page_icon="🏃",
-    layout="centered",
-)
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-def find_model_path():
-    """Look for the model next to this script, or any .keras/.h5 file there."""
-    default = os.path.join(BASE_DIR, "har_model.keras")
-    if os.path.exists(default):
-        return default
-    for name in sorted(os.listdir(BASE_DIR)):
-        if name.lower().endswith((".keras", ".h5")):
-            return os.path.join(BASE_DIR, name)
-    return None
-
-
-MODEL_PATH = find_model_path()
-DATASET_PATH = os.path.join(BASE_DIR, "UCI HAR Dataset")  # optional (demo tab)
-
-LABELS = [
-    "Walking",
-    "Walking Upstairs",
-    "Walking Downstairs",
-    "Sitting",
-    "Standing",
-    "Laying",
-]
-
-EMOJIS = ["🚶", "🪜⬆️", "🪜⬇️", "🪑", "🧍", "🛌"]
-
-SIGNALS = [
-    "body_acc_x", "body_acc_y", "body_acc_z",
-    "total_acc_x", "total_acc_y", "total_acc_z",
-    "body_gyro_x", "body_gyro_y", "body_gyro_z",
-]
-
-WINDOW = 128  # readings per sample (2.56 s at 50 Hz)
-
-
-# ----------------------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------------------
-@st.cache_resource
-def load_model():
-    return tf.keras.models.load_model(MODEL_PATH)
-
-
-@st.cache_data
-def load_demo_samples():
-    """Load the UCI HAR test set (only if the dataset folder is present)."""
-    data = []
-    for signal in SIGNALS:
-        path = os.path.join(
-            DATASET_PATH, "test", "Inertial Signals", f"{signal}_test.txt"
-        )
-        data.append(np.loadtxt(path))
-    X = np.stack(data, axis=2)
-    y = np.loadtxt(os.path.join(DATASET_PATH, "test", "y_test.txt")).astype(int) - 1
-    return X, y
-
-
-def parse_csv(file):
-    """Read an uploaded CSV into an array of shape (n_windows, 128, 9)."""
-    df = pd.read_csv(file, header=None)
-    df = df.apply(pd.to_numeric, errors="coerce")
-
-    # Drop a header row if the first row is non-numeric
-    if df.iloc[0].isna().all():
-        df = df.iloc[1:]
-    df = df.dropna(how="all").reset_index(drop=True)
-
-    values = df.to_numpy(dtype=np.float32)
-
-    # Accept (9 x N) files by transposing
-    if values.shape[1] != 9 and values.shape[0] == 9:
-        values = values.T
-
-    if values.shape[1] != 9:
-        raise ValueError(
-            f"Expected 9 columns (signals), but found {values.shape[1]}."
-        )
-    if np.isnan(values).any():
-        raise ValueError("The file contains missing or non-numeric values.")
-    if values.shape[0] < WINDOW:
-        raise ValueError(
-            f"Need at least {WINDOW} rows (readings), but found {values.shape[0]}."
-        )
-
-    n_windows = values.shape[0] // WINDOW
-    return values[: n_windows * WINDOW].reshape(n_windows, WINDOW, 9)
-
-
-def show_prediction(model, window):
-    """Predict a single window of shape (128, 9) and display the result."""
-    probs = model.predict(window[np.newaxis, ...], verbose=0)[0]
-    idx = int(np.argmax(probs))
-
-    st.success(f"### {EMOJIS[idx]} {LABELS[idx]}")
-    st.metric("Confidence", f"{probs[idx] * 100:.2f}%")
-
-    st.markdown("**Probability for each activity**")
-    prob_df = pd.DataFrame({"Activity": LABELS, "Probability": probs}).set_index(
-        "Activity"
-    )
-    st.bar_chart(prob_df)
-
-    with st.expander("View sensor signals"):
-        signal_df = pd.DataFrame(window, columns=SIGNALS)
-        st.line_chart(signal_df)
-
-    return idx
-
-
-# ----------------------------------------------------------------------
-# UI
-# ----------------------------------------------------------------------
-st.title("🏃 Human Activity Recognition")
+st.set_page_config(page_title="Live Human Activity Recognition", page_icon="🏃")
+st.title("🏃 Live Human Activity Recognition")
 st.write(
-    "Predict a person's activity from smartphone accelerometer and gyroscope "
-    "data using an **LSTM** model trained on the UCI HAR dataset."
+    "Allow camera access and keep your **full body** in view. "
+    "The app detects body landmarks (MediaPipe Pose) and labels your activity live: "
+    "Standing, Sitting, Walking or Laying."
 )
 
-if MODEL_PATH is None:
-    st.error(
-        "Model file not found. Upload `har_model.keras` to the same folder as "
-        "this app file in your GitHub repo (the notebook creates it)."
-    )
-    st.caption(f"Files found in app folder: {', '.join(sorted(os.listdir(BASE_DIR)))}")
-    st.stop()
+mp_pose = mp.solutions.pose
+mp_draw = mp.solutions.drawing_utils
+L = mp_pose.PoseLandmark
 
-model = load_model()
 
-tab_upload, tab_demo, tab_about = st.tabs(["📂 Upload CSV", "🧪 Demo sample", "ℹ️ About"])
+@st.cache_resource
+def get_state():
+    """One shared pose model + small history buffers (kept across reruns)."""
+    return {
+        "pose": mp_pose.Pose(
+            model_complexity=0,            # fastest model, good for CPU hosting
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        ),
+        "ankle_gap": deque(maxlen=20),     # recent left-right ankle height gap
+        "labels": deque(maxlen=7),         # recent labels for smoothing
+    }
 
-# ---------------------------- Upload tab ------------------------------
-with tab_upload:
-    st.markdown(
-        f"""
-Upload a CSV file with **9 columns** (one per signal, in this order) and at
-least **{WINDOW} rows** (readings):
 
-`{", ".join(SIGNALS)}`
+state = get_state()
 
-If the file has more rows, it is split into windows of {WINDOW} readings and
-each window is classified.
-"""
-    )
 
-    uploaded = st.file_uploader("Choose a CSV file", type=["csv"])
+def classify(lm, st_):
+    """Rule-based activity from pose landmarks (image coords: y grows downward)."""
+    def pt(i):
+        return np.array([lm[i].x, lm[i].y])
 
-    if uploaded is not None:
-        try:
-            windows = parse_csv(uploaded)
-        except Exception as e:
-            st.error(f"Could not read the file: {e}")
-        else:
-            st.info(f"Found **{len(windows)}** window(s) of {WINDOW} readings.")
+    key_points = [L.LEFT_SHOULDER, L.RIGHT_SHOULDER, L.LEFT_HIP, L.RIGHT_HIP,
+                  L.LEFT_KNEE, L.RIGHT_KNEE]
+    if min(lm[i].visibility for i in key_points) < 0.5:
+        return "Show full body"
 
-            if len(windows) == 1:
-                show_prediction(model, windows[0])
-            else:
-                probs = model.predict(windows, verbose=0)
-                preds = np.argmax(probs, axis=1)
+    shoulder = (pt(L.LEFT_SHOULDER) + pt(L.RIGHT_SHOULDER)) / 2
+    hip = (pt(L.LEFT_HIP) + pt(L.RIGHT_HIP)) / 2
+    knee = (pt(L.LEFT_KNEE) + pt(L.RIGHT_KNEE)) / 2
+    torso = hip - shoulder
+    torso_len = np.linalg.norm(torso) + 1e-6
 
-                result_df = pd.DataFrame(
-                    {
-                        "Window": np.arange(1, len(windows) + 1),
-                        "Activity": [LABELS[i] for i in preds],
-                        "Confidence (%)": (np.max(probs, axis=1) * 100).round(2),
-                    }
-                )
-                st.dataframe(result_df, use_container_width=True, hide_index=True)
+    # 1) Laying: torso is closer to horizontal than vertical
+    if abs(torso[0]) > abs(torso[1]):
+        st_["ankle_gap"].clear()
+        return "Laying"
 
-                st.markdown("**Activity distribution**")
-                counts = (
-                    pd.Series([LABELS[i] for i in preds])
-                    .value_counts()
-                    .reindex(LABELS, fill_value=0)
-                )
-                st.bar_chart(counts)
+    # 2) Walking: ankles keep swapping height (large variation over recent frames)
+    gap = (lm[L.LEFT_ANKLE].y - lm[L.RIGHT_ANKLE].y) / torso_len
+    st_["ankle_gap"].append(gap)
+    if len(st_["ankle_gap"]) >= 15 and np.std(st_["ankle_gap"]) > 0.08:
+        return "Walking"
 
-                st.markdown("**Inspect a window**")
-                chosen = st.slider("Window number", 1, len(windows), 1)
-                show_prediction(model, windows[chosen - 1])
+    # 3) Sitting vs Standing: how far the knees hang below the hips
+    thigh_drop = (knee[1] - hip[1]) / torso_len
+    return "Sitting" if thigh_drop < 0.6 else "Standing"
 
-# ----------------------------- Demo tab -------------------------------
-with tab_demo:
-    if not os.path.isdir(DATASET_PATH):
-        st.info(
-            f"To use this tab, place the extracted `{DATASET_PATH}` folder next "
-            "to `app.py`. Otherwise, use the **Upload CSV** tab."
-        )
-    else:
-        X_test, y_test = load_demo_samples()
-        st.write(f"Pick a sample from the test set ({len(X_test)} samples).")
 
-        index = st.number_input(
-            "Sample number", min_value=0, max_value=len(X_test) - 1, value=0, step=1
-        )
+def video_frame_callback(frame):
+    img = frame.to_ndarray(format="bgr24")
+    result = state["pose"].process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-        if st.button("Predict", type="primary"):
-            pred = show_prediction(model, X_test[int(index)])
-            actual = int(y_test[int(index)])
-            if pred == actual:
-                st.caption(f"✅ Actual activity: {LABELS[actual]}")
-            else:
-                st.caption(f"❌ Actual activity: {LABELS[actual]}")
+    label = "No person detected"
+    if result.pose_landmarks:
+        mp_draw.draw_landmarks(img, result.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+        label = classify(result.pose_landmarks.landmark, state)
 
-# ----------------------------- About tab ------------------------------
-with tab_about:
-    st.markdown(
-        """
-**Model:** LSTM (64) → Dropout (0.3) → Dense (32, ReLU) → Dense (6, Softmax)
+    state["labels"].append(label)
+    shown = max(set(state["labels"]), key=list(state["labels"]).count)
 
-**Dataset:** UCI Human Activity Recognition Using Smartphones
+    cv2.rectangle(img, (0, 0), (img.shape[1], 42), (0, 0, 0), -1)
+    cv2.putText(img, f"Activity: {shown}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+    return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-**Test accuracy:** ~80.6%
 
-**Activities:** Walking, Walking Upstairs, Walking Downstairs, Sitting,
-Standing, Laying
-"""
-    )
+webrtc_streamer(
+    key="live-har",
+    video_frame_callback=video_frame_callback,
+    media_stream_constraints={"video": {"width": 640, "height": 480}, "audio": False},
+    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    async_processing=True,
+)
+
+st.caption(
+    "Tips: use good lighting, stand 2–3 m from the camera, keep head to feet visible. "
+    "Walk sideways across the frame for best walking detection."
+)
