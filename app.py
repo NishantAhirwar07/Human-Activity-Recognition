@@ -4,12 +4,11 @@ import sys
 import tempfile
 import warnings
 
-# Suppress MediaPipe warnings
+# Suppress warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow logs
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-# === CRITICAL: Set up MediaPipe cache BEFORE any imports ===
-# Use system temp directory which is always writable
+# === Set up MediaPipe cache BEFORE any imports ===
 mediapipe_cache = os.path.join(tempfile.gettempdir(), "mediapipe_models")
 os.makedirs(mediapipe_cache, exist_ok=True)
 os.environ['MEDIAPIPE_PYTHON_MODELS_DIR'] = mediapipe_cache
@@ -28,21 +27,23 @@ st.write(
     "Standing, Sitting, Walking or Laying."
 )
 
-# Import mediapipe after environment setup and warnings suppression
+# Import mediapipe with proper error handling
 try:
     import mediapipe as mp
-    from mediapipe import solutions
-    from mediapipe.framework.formats import landmark_pb2
-except ImportError as e:
+    mp_pose = mp.solutions.pose
+    mp_drawing = mp.solutions.drawing_utils
+    L = mp_pose.PoseLandmark
+except (ImportError, AttributeError) as e:
     st.error(f"❌ MediaPipe import failed: {e}")
-    st.info("Please reinstall dependencies: `pip install --upgrade mediapipe`")
+    st.info(
+        "Please ensure MediaPipe is properly installed:\n"
+        "```bash\n"
+        "pip install --upgrade mediapipe\n"
+        "```"
+    )
     st.stop()
 
 from streamlit_webrtc import webrtc_streamer
-
-mp_pose = solutions.pose
-mp_drawing = solutions.drawing_utils
-L = mp_pose.PoseLandmark
 
 pose_model = None
 model_error = None
@@ -51,10 +52,7 @@ model_error = None
 @st.cache_resource
 def initialize_pose_model():
     """Initialize MediaPipe Pose model with error handling."""
-    global pose_model, model_error
-    
     try:
-        # Try to create Pose with lite model (fastest, most compatible)
         model = mp_pose.Pose(
             model_complexity=0,
             min_detection_confidence=0.5,
@@ -65,13 +63,14 @@ def initialize_pose_model():
     
     except PermissionError as e:
         error_msg = (
-            "🔒 **Permission Denied**: MediaPipe cannot access model files on Streamlit Cloud. "
-            "This is a platform limitation, not a code issue."
+            "🔒 **Permission Denied**: MediaPipe cannot access model files.\n\n"
+            "This is a **Streamlit Cloud limitation**. The app needs a platform "
+            "with writable filesystem access."
         )
         return None, error_msg
     
     except Exception as e:
-        error_msg = f"❌ Error initializing MediaPipe Pose: {type(e).__name__}: {str(e)[:100]}"
+        error_msg = f"❌ Error initializing MediaPipe: {type(e).__name__}: {str(e)[:100]}"
         return None, error_msg
 
 
@@ -81,24 +80,48 @@ pose_model, model_error = initialize_pose_model()
 # Display error and solutions
 if model_error:
     st.warning(model_error)
-    with st.expander("ℹ️ Solutions", expanded=True):
+    with st.expander("✅ How to Fix (3 Options)", expanded=True):
         st.markdown("""
-        **Option 1: Refresh the page** (sometimes the model cache loads on retry)
-        
-        **Option 2: Deploy on a less-restricted platform:**
-        - [Render](https://render.com) - Free tier available
-        - [Replit](https://replit.com) - Great for Python apps
-        - [Railway](https://railway.app) - Simple deployment
-        - [PythonAnywhere](https://www.pythonanywhere.com) - Python-focused
-        
-        **Option 3: Run locally**
+        ### Option 1: Run Locally (Fastest & Guaranteed to Work)
         ```bash
-        git clone <repo-url>
+        git clone https://github.com/NishantAhirwar07/Human-Activity-Recognition.git
         cd Human-Activity-Recognition
         pip install -r requirements.txt
         streamlit run app.py
         ```
+        Then open **http://localhost:8501** in your browser.
+        
+        ---
+        
+        ### Option 2: Deploy on Render (Free)
+        1. Push this repo to GitHub
+        2. Go to [render.com](https://render.com)
+        3. Click "New +" → "Web Service"
+        4. Connect your GitHub repo
+        5. Set Runtime: **Python 3.12**
+        6. Build command: `pip install -r requirements.txt`
+        7. Start command: `streamlit run app.py --server.port=10000`
+        8. Add env var: `STREAMLIT_SERVER_PORT=10000`
+        
+        ---
+        
+        ### Option 3: Deploy on Railway (Free Credit)
+        1. Go to [railway.app](https://railway.app)
+        2. Click "New Project" → "Deploy from GitHub"
+        3. Select your repo
+        4. Railway auto-detects Streamlit
+        5. Deploy automatically
+        
+        ---
+        
+        **Why Streamlit Cloud doesn't work?**
+        - Streamlit Cloud's sandbox has read-only package directories
+        - MediaPipe needs writable access to load model files
+        - This is a platform limitation, not a code bug
         """)
+    
+    st.error("❌ Cannot start app without MediaPipe model. Please use one of the solutions above.")
+    st.stop()
 
 
 def classify(landmarks, history_state):
@@ -143,15 +166,6 @@ def classify(landmarks, history_state):
 
 def video_frame_callback(frame):
     """Process video frames for pose detection."""
-    if pose_model is None:
-        img = frame.to_ndarray(format="bgr24")
-        cv2.rectangle(img, (0, 0), (img.shape[1], 42), (200, 50, 50), -1)
-        cv2.putText(
-            img, "Model unavailable", (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2
-        )
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
-
     img = frame.to_ndarray(format="bgr24")
     rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     
@@ -192,24 +206,21 @@ if "activity_state" not in st.session_state:
         "labels": deque(maxlen=7),
     }
 
-# Only show webrtc if model loaded successfully
-if pose_model is not None:
-    webrtc_streamer(
-        key="live-har",
-        video_frame_callback=video_frame_callback,
-        media_stream_constraints={
-            "video": {"width": 640, "height": 480},
-            "audio": False
-        },
-        rtc_configuration={
-            "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-        },
-        async_processing=True,
-    )
+# Start video stream
+webrtc_streamer(
+    key="live-har",
+    video_frame_callback=video_frame_callback,
+    media_stream_constraints={
+        "video": {"width": 640, "height": 480},
+        "audio": False
+    },
+    rtc_configuration={
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    },
+    async_processing=True,
+)
 
-    st.caption(
-        "💡 **Tips**: Use good lighting, stand 2–3 m from the camera, keep your full body visible. "
-        "Walk sideways for best walking detection."
-    )
-else:
-    st.error("Cannot start video stream. Please try one of the solutions above.")
+st.caption(
+    "💡 **Tips**: Use good lighting, stand 2–3 m from the camera, keep your full body visible. "
+    "Walk sideways for best walking detection."
+)
