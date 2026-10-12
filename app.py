@@ -1,17 +1,31 @@
 from collections import deque
 import os
 import sys
+import tempfile
 
-# Set MediaPipe model cache to Streamlit's temp directory (always writable)
-cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "mediapipe")
-os.makedirs(cache_dir, exist_ok=True)
-os.environ['MEDIAPIPE_PYTHON_MODELS_DIR'] = cache_dir
+# === CRITICAL: Set up MediaPipe cache BEFORE any imports ===
+# Use system temp directory which is always writable
+mediapipe_cache = os.path.join(tempfile.gettempdir(), "mediapipe_cache")
+os.makedirs(mediapipe_cache, exist_ok=True)
+os.environ['MEDIAPIPE_PYTHON_MODELS_DIR'] = mediapipe_cache
+
+# Disable MediaPipe's automatic model download attempt
+os.environ['MEDIAPIPE_DISABLE_GPU'] = '1'
 
 import av
 import cv2
 import numpy as np
 import streamlit as st
-import mediapipe as mp
+
+# Import mediapipe after environment setup
+try:
+    import mediapipe as mp
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
+except ImportError:
+    st.error("MediaPipe not installed. Please run: pip install mediapipe==0.10.21")
+    st.stop()
+
 from streamlit_webrtc import webrtc_streamer
 
 st.set_page_config(page_title="Live Human Activity Recognition", page_icon="🏃")
@@ -31,22 +45,51 @@ L = mp_pose.PoseLandmark
 def get_state():
     """One shared pose model + small history buffers (kept across reruns)."""
     try:
+        pose_model = mp_pose.Pose(
+            model_complexity=0,            # fastest model, good for CPU hosting
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
         return {
-            "pose": mp_pose.Pose(
-                model_complexity=0,            # fastest model, good for CPU hosting
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
-            ),
+            "pose": pose_model,
             "ankle_gap": deque(maxlen=20),     # recent left-right ankle height gap
             "labels": deque(maxlen=7),         # recent labels for smoothing
+            "error": None,
+        }
+    except PermissionError as e:
+        error_msg = f"Permission denied loading MediaPipe model. Using fallback mode."
+        return {
+            "pose": None,
+            "ankle_gap": deque(maxlen=20),
+            "labels": deque(maxlen=7),
+            "error": error_msg,
         }
     except Exception as e:
-        st.error(f"⚠️ Error loading MediaPipe Pose model: {str(e)}")
-        st.info("This may be a temporary issue. Please refresh the page.")
-        st.stop()
+        error_msg = f"Error loading MediaPipe Pose model: {type(e).__name__}: {str(e)}"
+        return {
+            "pose": None,
+            "ankle_gap": deque(maxlen=20),
+            "labels": deque(maxlen=7),
+            "error": error_msg,
+        }
 
 
 state = get_state()
+
+# Display error if model failed to load
+if state["error"]:
+    st.warning(f"⚠️ {state['error']}")
+    st.info(
+        "Streamlit Cloud has restricted permissions for the MediaPipe installation directory. "
+        "Please try these solutions:\n\n"
+        "1. **Add a `.streamlit/config.toml`** file to your repo with:\n"
+        "```\n"
+        "[logger]\n"
+        "level = \"warning\"\n"
+        "```\n\n"
+        "2. **Upgrade MediaPipe**: Update `requirements.txt` to use `mediapipe>=0.11.0`\n\n"
+        "3. **Alternative**: Deploy on a platform with fewer restrictions (Replit, Render, Railway)."
+    )
 
 
 def classify(lm, st_):
@@ -82,6 +125,14 @@ def classify(lm, st_):
 
 
 def video_frame_callback(frame):
+    # If model failed to load, show error message on video
+    if state["pose"] is None:
+        img = frame.to_ndarray(format="bgr24")
+        cv2.rectangle(img, (0, 0), (img.shape[1], 42), (0, 0, 0), -1)
+        cv2.putText(img, "Model failed to load", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
     img = frame.to_ndarray(format="bgr24")
     result = state["pose"].process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
@@ -99,15 +150,18 @@ def video_frame_callback(frame):
     return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
-webrtc_streamer(
-    key="live-har",
-    video_frame_callback=video_frame_callback,
-    media_stream_constraints={"video": {"width": 640, "height": 480}, "audio": False},
-    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-    async_processing=True,
-)
+if state["pose"] is not None:
+    webrtc_streamer(
+        key="live-har",
+        video_frame_callback=video_frame_callback,
+        media_stream_constraints={"video": {"width": 640, "height": 480}, "audio": False},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        async_processing=True,
+    )
 
-st.caption(
-    "Tips: use good lighting, stand 2–3 m from the camera, keep head to feet visible. "
-    "Walk sideways across the frame for best walking detection."
-)
+    st.caption(
+        "Tips: use good lighting, stand 2–3 m from the camera, keep head to feet visible. "
+        "Walk sideways across the frame for best walking detection."
+    )
+else:
+    st.error("Cannot start video stream without a working pose model.")
