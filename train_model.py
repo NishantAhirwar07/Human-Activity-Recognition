@@ -15,6 +15,8 @@ import sys
 import numpy as np
 import tensorflow as tf
 from sklearn.metrics import classification_report
+from sklearn.preprocessing import StandardScaler
+from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
 from tensorflow.keras.models import Sequential
 
@@ -37,12 +39,12 @@ def load_sensor_data(folder):
     data = []
     for signal in SIGNALS:
         path = os.path.join(DATA_PATH, folder, "Inertial Signals", f"{signal}_{folder}.txt")
-        data.append(np.loadtxt(path))
-    return np.stack(data, axis=2)  # (samples, 128, 9)
+        data.append(np.loadtxt(path, dtype=np.float32))
+    return np.stack(data, axis=2).astype(np.float32)
 
 
 def load_labels(folder):
-    return np.loadtxt(os.path.join(DATA_PATH, folder, f"y_{folder}.txt")).astype(int) - 1
+    return np.loadtxt(os.path.join(DATA_PATH, folder, f"y_{folder}.txt"), dtype=np.int32).astype(np.int32) - 1
 
 
 if not os.path.isdir(DATA_PATH):
@@ -50,7 +52,18 @@ if not os.path.isdir(DATA_PATH):
 
 X_train, X_test = load_sensor_data("train"), load_sensor_data("test")
 y_train, y_test = load_labels("train"), load_labels("test")
+
 print("Train:", X_train.shape, "Test:", X_test.shape)
+
+# Standardize sensor values across all channels to improve LSTM convergence and training stability.
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train.reshape(-1, X_train.shape[-1])).reshape(X_train.shape).astype(np.float32)
+X_test = scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape).astype(np.float32)
+
+# Use a fixed validation split to avoid recomputing data at every epoch and improve training consistency.
+val_split = int(len(X_train) * 0.1)
+X_tr, X_val = X_train[:-val_split], X_train[-val_split:]
+y_tr, y_val = y_train[:-val_split], y_train[-val_split:]
 
 model = Sequential([
     Input(shape=(128, 9)),
@@ -62,7 +75,19 @@ model = Sequential([
 model.compile(optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"])
 model.summary()
 
-model.fit(X_train, y_train, epochs=10, batch_size=128, validation_split=0.1, verbose=1)
+callbacks = [
+    EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True)
+]
+
+history = model.fit(
+    X_tr,
+    y_tr,
+    epochs=10,
+    batch_size=64,
+    validation_data=(X_val, y_val),
+    callbacks=callbacks,
+    verbose=1,
+)
 
 loss, acc = model.evaluate(X_test, y_test, verbose=0)
 print(f"\nTest loss: {loss:.4f} | Test accuracy: {acc * 100:.2f}%")
