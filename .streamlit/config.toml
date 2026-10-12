@@ -1,0 +1,16 @@
+[client]
+showErrorDetails = false
+
+[logger]
+level = "warning"
+
+[server]
+headless = true
+port = 8501
+maxUploadSize = 200
+
+[theme]
+primaryColor = "#FF6B35"
+backgroundColor = "#1E1E1E"
+secondaryBackgroundColor = "#2D2D2D"
+textColor = "#FFFFFF"
