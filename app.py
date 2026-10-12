@@ -1,5 +1,6 @@
-from collections import deque
+from collections import Counter, deque
 
+import av
 import cv2
 import numpy as np
 import streamlit as st
@@ -24,12 +25,12 @@ def get_state():
     """One shared pose model + small history buffers (kept across reruns)."""
     return {
         "pose": mp_pose.Pose(
-            model_complexity=0,            # fastest model, good for CPU hosting
+            model_complexity=0,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         ),
-        "ankle_gap": deque(maxlen=20),     # recent left-right ankle height gap
-        "labels": deque(maxlen=7),         # recent labels for smoothing
+        "ankle_gap": deque(maxlen=20),
+        "labels": deque(maxlen=7),
     }
 
 
@@ -38,11 +39,18 @@ state = get_state()
 
 def classify(lm, st_):
     """Rule-based activity from pose landmarks (image coords: y grows downward)."""
-    def pt(i):
-        return np.array([lm[i].x, lm[i].y])
 
-    key_points = [L.LEFT_SHOULDER, L.RIGHT_SHOULDER, L.LEFT_HIP, L.RIGHT_HIP,
-                  L.LEFT_KNEE, L.RIGHT_KNEE]
+    def pt(i):
+        return np.array([lm[i].x, lm[i].y], dtype=np.float32)
+
+    key_points = [
+        L.LEFT_SHOULDER,
+        L.RIGHT_SHOULDER,
+        L.LEFT_HIP,
+        L.RIGHT_HIP,
+        L.LEFT_KNEE,
+        L.RIGHT_KNEE,
+    ]
     if min(lm[i].visibility for i in key_points) < 0.5:
         return "Show full body"
 
@@ -50,7 +58,9 @@ def classify(lm, st_):
     hip = (pt(L.LEFT_HIP) + pt(L.RIGHT_HIP)) / 2
     knee = (pt(L.LEFT_KNEE) + pt(L.RIGHT_KNEE)) / 2
     torso = hip - shoulder
-    torso_len = np.linalg.norm(torso) + 1e-6
+    torso_len = np.linalg.norm(torso)
+    if torso_len < 1e-6:
+        torso_len = 1e-6
 
     # 1) Laying: torso is closer to horizontal than vertical
     if abs(torso[0]) > abs(torso[1]):
@@ -78,11 +88,18 @@ def video_frame_callback(frame):
         label = classify(result.pose_landmarks.landmark, state)
 
     state["labels"].append(label)
-    shown = max(set(state["labels"]), key=list(state["labels"]).count)
+    shown = Counter(state["labels"]).most_common(1)[0][0]
 
     cv2.rectangle(img, (0, 0), (img.shape[1], 42), (0, 0, 0), -1)
-    cv2.putText(img, f"Activity: {shown}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+    cv2.putText(
+        img,
+        f"Activity: {shown}",
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (0, 255, 0),
+        2,
+    )
     return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
