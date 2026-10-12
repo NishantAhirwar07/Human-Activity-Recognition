@@ -1,8 +1,11 @@
 from collections import deque
 import os
+import sys
 
-# Set MediaPipe model cache to a writable directory before importing
-os.environ['MEDIAPIPE_PYTHON_MODELS_DIR'] = os.path.expanduser('~/.mediapipe_models')
+# Set MediaPipe model cache to Streamlit's temp directory (always writable)
+cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "mediapipe")
+os.makedirs(cache_dir, exist_ok=True)
+os.environ['MEDIAPIPE_PYTHON_MODELS_DIR'] = cache_dir
 
 import av
 import cv2
@@ -27,15 +30,20 @@ L = mp_pose.PoseLandmark
 @st.cache_resource
 def get_state():
     """One shared pose model + small history buffers (kept across reruns)."""
-    return {
-        "pose": mp_pose.Pose(
-            model_complexity=0,            # fastest model, good for CPU hosting
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        ),
-        "ankle_gap": deque(maxlen=20),     # recent left-right ankle height gap
-        "labels": deque(maxlen=7),         # recent labels for smoothing
-    }
+    try:
+        return {
+            "pose": mp_pose.Pose(
+                model_complexity=0,            # fastest model, good for CPU hosting
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5,
+            ),
+            "ankle_gap": deque(maxlen=20),     # recent left-right ankle height gap
+            "labels": deque(maxlen=7),         # recent labels for smoothing
+        }
+    except Exception as e:
+        st.error(f"⚠️ Error loading MediaPipe Pose model: {str(e)}")
+        st.info("This may be a temporary issue. Please refresh the page.")
+        st.stop()
 
 
 state = get_state()
