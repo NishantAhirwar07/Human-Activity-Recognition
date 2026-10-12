@@ -1,4 +1,8 @@
 from collections import deque
+import os
+
+# Set MediaPipe model cache to a writable directory before importing
+os.environ['MEDIAPIPE_PYTHON_MODELS_DIR'] = os.path.expanduser('~/.mediapipe_models')
 
 import av
 import cv2
