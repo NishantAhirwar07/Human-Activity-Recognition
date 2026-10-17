@@ -8,6 +8,14 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
+# Configure deployment-safe runtime settings before importing ML libraries
+try:
+    from streamlit_config import configure_streamlit_runtime
+    configure_streamlit_runtime()
+except Exception:
+    # Keep the app from crashing if this helper is unavailable during a minimal run.
+    pass
+
 # === Set up MediaPipe cache BEFORE any imports ===
 mediapipe_cache = os.path.join(tempfile.gettempdir(), "mediapipe_models")
 os.makedirs(mediapipe_cache, exist_ok=True)
@@ -43,7 +51,18 @@ except (ImportError, AttributeError) as e:
     )
     st.stop()
 
-from streamlit_webrtc import webrtc_streamer
+try:
+    from streamlit_webrtc import webrtc_streamer
+except Exception as e:
+    st.warning(
+        "⚠️ WebRTC is not available in this deployment environment. "
+        "This app requires webcam support, so it cannot run on this hosting platform. "
+        "Please run locally or deploy on a platform with camera access enabled."
+    )
+    st.info(
+        "Local run example:\n```bash\nstreamlit run app.py\n```"
+    )
+    st.stop()
 
 pose_model = None
 model_error = None
@@ -60,7 +79,7 @@ def initialize_pose_model():
             static_image_mode=False,
         )
         return model, None
-    
+
     except PermissionError as e:
         error_msg = (
             "🔒 **Permission Denied**: MediaPipe cannot access model files.\n\n"
@@ -68,7 +87,7 @@ def initialize_pose_model():
             "with writable filesystem access."
         )
         return None, error_msg
-    
+
     except Exception as e:
         error_msg = f"❌ Error initializing MediaPipe: {type(e).__name__}: {str(e)[:100]}"
         return None, error_msg
@@ -90,9 +109,9 @@ if model_error:
         streamlit run app.py
         ```
         Then open **http://localhost:8501** in your browser.
-        
+
         ---
-        
+
         ### Option 2: Deploy on Render (Free)
         1. Push this repo to GitHub
         2. Go to [render.com](https://render.com)
@@ -102,24 +121,24 @@ if model_error:
         6. Build command: `pip install -r requirements.txt`
         7. Start command: `streamlit run app.py --server.port=10000`
         8. Add env var: `STREAMLIT_SERVER_PORT=10000`
-        
+
         ---
-        
+
         ### Option 3: Deploy on Railway (Free Credit)
         1. Go to [railway.app](https://railway.app)
         2. Click "New Project" → "Deploy from GitHub"
         3. Select your repo
         4. Railway auto-detects Streamlit
         5. Deploy automatically
-        
+
         ---
-        
+
         **Why Streamlit Cloud doesn't work?**
         - Streamlit Cloud's sandbox has read-only package directories
         - MediaPipe needs writable access to load model files
         - This is a platform limitation, not a code bug
         """)
-    
+
     st.error("❌ Cannot start app without MediaPipe model. Please use one of the solutions above.")
     st.stop()
 
@@ -130,11 +149,11 @@ def classify(landmarks, history_state):
         return np.array([landmarks[i].x, landmarks[i].y])
 
     key_points = [
-        L.LEFT_SHOULDER, L.RIGHT_SHOULDER, 
+        L.LEFT_SHOULDER, L.RIGHT_SHOULDER,
         L.LEFT_HIP, L.RIGHT_HIP,
         L.LEFT_KNEE, L.RIGHT_KNEE
     ]
-    
+
     # Check visibility
     if min(landmarks[i].visibility for i in key_points) < 0.5:
         return "Show full body"
@@ -153,7 +172,7 @@ def classify(landmarks, history_state):
     # 2) Walking: ankles keep swapping height
     gap = (landmarks[L.LEFT_ANKLE].y - landmarks[L.RIGHT_ANKLE].y) / torso_len
     history_state["ankle_gap"].append(gap)
-    
+
     if len(history_state["ankle_gap"]) >= 15:
         gap_std = np.std(list(history_state["ankle_gap"]))
         if gap_std > 0.08:
@@ -168,10 +187,10 @@ def video_frame_callback(frame):
     """Process video frames for pose detection."""
     img = frame.to_ndarray(format="bgr24")
     rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
+
     results = pose_model.process(rgb_image)
     label = "No person detected"
-    
+
     if results.pose_landmarks:
         # Draw landmarks
         mp_drawing.draw_landmarks(img, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
@@ -179,11 +198,11 @@ def video_frame_callback(frame):
 
     # Update label history for smoothing
     st.session_state.activity_state["labels"].append(label)
-    
+
     # Show most common label
     if st.session_state.activity_state["labels"]:
         shown = max(
-            set(st.session_state.activity_state["labels"]), 
+            set(st.session_state.activity_state["labels"]),
             key=list(st.session_state.activity_state["labels"]).count
         )
     else:
@@ -195,7 +214,7 @@ def video_frame_callback(frame):
         img, f"Activity: {shown}", (10, 30),
         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2
     )
-    
+
     return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
